@@ -2,6 +2,9 @@
 // Body: { imageBase64: string, restaurantName?: string }
 // Returns: { dishes: [{ originalName, englishName, price, section, photoUrl, photoSource }] }
 
+// Increase body size limit to 10MB for base64 images
+module.exports.config = { api: { bodyParser: { sizeLimit: '10mb' } } };
+
 const { createClient } = require('@supabase/supabase-js');
 
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
