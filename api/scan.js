@@ -2,8 +2,6 @@
 // Body: { imageBase64: string, restaurantName?: string }
 // Returns: { dishes: [{ originalName, englishName, price, section, photoUrl, photoSource }] }
 
-// Increase body size limit to 10MB for base64 images
-module.exports.config = { api: { bodyParser: { sizeLimit: '10mb' } } };
 
 const { createClient } = require('@supabase/supabase-js');
 
@@ -152,4 +150,9 @@ module.exports = async (req, res) => {
     console.error('Scan error:', err);
     return res.status(500).json({ error: err.message });
   }
+};
+
+// Must be after module.exports assignment
+module.exports.config = {
+  api: { bodyParser: { sizeLimit: '10mb' } }
 };
