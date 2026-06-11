@@ -1,7 +1,7 @@
 // POST /api/scan
-// Body: { imageBase64: string, restaurantName?: string }
+// Accepts multipart/form-data: image file + restaurantName field
+// OR application/octet-stream with ?restaurant= query param
 // Returns: { dishes: [{ originalName, englishName, price, section, photoUrl, photoSource }] }
-
 
 const { createClient } = require('@supabase/supabase-js');
 
@@ -9,11 +9,25 @@ const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemi
 const SEARCH_URL = 'https://www.googleapis.com/customsearch/v1';
 const MEAL_DB_URL = 'https://www.themealdb.com/api/json/v1/1/search.php';
 
+module.exports.config = {
+  api: { bodyParser: false }
+};
+
 function getSupabase() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_KEY;
   if (!url || !key) return null;
   return createClient(url, key);
+}
+
+// Read raw body from request
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
 }
 
 // ── Step 1: Extract dishes from menu image via Gemini ─────────────────────
@@ -33,9 +47,7 @@ Return ONLY a JSON array. Each item must have:
 - "section": menu section heading if visible (else omit)
 No markdown. No explanation. JSON array only.`
           },
-          {
-            inline_data: { mime_type: 'image/jpeg', data: imageBase64 }
-          }
+          { inline_data: { mime_type: 'image/jpeg', data: imageBase64 } }
         ]
       }],
       generationConfig: { temperature: 0, maxOutputTokens: 1024 }
@@ -53,23 +65,21 @@ No markdown. No explanation. JSON array only.`
   return JSON.parse(clean);
 }
 
-// ── Step 2a: Check Supabase cache ─────────────────────────────────────────
+// ── Supabase cache ────────────────────────────────────────────────────────
 async function getCachedPhoto(dishName) {
   const sb = getSupabase();
   if (!sb) return null;
-  const key = dishName.toLowerCase().trim();
-  const { data } = await sb.from('dish_photos').select('photo_url, source').eq('dish_name', key).single();
+  const { data } = await sb.from('dish_photos').select('photo_url, source').eq('dish_name', dishName.toLowerCase().trim()).single();
   return data ?? null;
 }
 
 async function setCachedPhoto(dishName, photoUrl, source) {
   const sb = getSupabase();
   if (!sb) return;
-  const key = dishName.toLowerCase().trim();
-  await sb.from('dish_photos').upsert({ dish_name: key, photo_url: photoUrl, source }, { onConflict: 'dish_name' });
+  await sb.from('dish_photos').upsert({ dish_name: dishName.toLowerCase().trim(), photo_url: photoUrl, source }, { onConflict: 'dish_name' });
 }
 
-// ── Step 2b: TheMealDB — free, food-specific ──────────────────────────────
+// ── TheMealDB ─────────────────────────────────────────────────────────────
 async function getMealDBPhoto(dishName) {
   const res = await fetch(`${MEAL_DB_URL}?s=${encodeURIComponent(dishName)}`);
   if (!res.ok) return null;
@@ -77,12 +87,11 @@ async function getMealDBPhoto(dishName) {
   return json.meals?.[0]?.strMealThumb ?? null;
 }
 
-// ── Step 2c: Google Custom Search fallback ────────────────────────────────
+// ── Google Custom Search fallback ─────────────────────────────────────────
 async function getSearchPhoto(dishName, restaurantName) {
   const query = restaurantName
     ? `${dishName} ${restaurantName} food dish`
     : `${dishName} food dish photo`;
-
   const url = `${SEARCH_URL}?key=${process.env.SEARCH_API_KEY}&cx=${process.env.SEARCH_CX}&searchType=image&num=1&q=${encodeURIComponent(query)}&imgSize=medium&safe=active`;
   const res = await fetch(url);
   if (!res.ok) return null;
@@ -90,20 +99,17 @@ async function getSearchPhoto(dishName, restaurantName) {
   return json.items?.[0]?.link ?? null;
 }
 
-// ── Step 2: Get photo for one dish ────────────────────────────────────────
+// ── Get photo for one dish ────────────────────────────────────────────────
 async function getPhotoForDish(dishName, restaurantName) {
-  // 1. Cache
   const cached = await getCachedPhoto(dishName);
   if (cached) return cached;
 
-  // 2. TheMealDB (free, no quota)
   const mealDb = await getMealDBPhoto(dishName).catch(() => null);
   if (mealDb) {
     await setCachedPhoto(dishName, mealDb, 'mealdb');
     return { photo_url: mealDb, source: 'mealdb' };
   }
 
-  // 3. Google Custom Search fallback
   const search = await getSearchPhoto(dishName, restaurantName).catch(() => null);
   if (search) {
     await setCachedPhoto(dishName, search, 'search');
@@ -115,7 +121,6 @@ async function getPhotoForDish(dishName, restaurantName) {
 
 // ── Main handler ──────────────────────────────────────────────────────────
 module.exports = async (req, res) => {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -123,17 +128,19 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { imageBase64, restaurantName } = req.body;
-    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
+    const restaurantName = req.query?.restaurant ?? '';
 
-    // Extract dishes
+    // Read raw body — image bytes sent as application/octet-stream
+    const buffer = await readBody(req);
+    if (!buffer.length) return res.status(400).json({ error: 'Image required' });
+
+    const imageBase64 = buffer.toString('base64');
+    console.log('Image received:', Math.round(imageBase64.length / 1024) + 'KB');
+
     const dishes = await extractDishes(imageBase64);
     if (!dishes.length) return res.json({ dishes: [] });
 
-    // Cap at 12 dishes to control cost
     const capped = dishes.slice(0, 12);
-
-    // Fetch photos in parallel
     const photos = await Promise.all(
       capped.map(d => getPhotoForDish(d.englishName, restaurantName))
     );
@@ -150,9 +157,4 @@ module.exports = async (req, res) => {
     console.error('Scan error:', err);
     return res.status(500).json({ error: err.message });
   }
-};
-
-// Must be after module.exports assignment
-module.exports.config = {
-  api: { bodyParser: { sizeLimit: '10mb' } }
 };
