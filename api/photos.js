@@ -4,7 +4,7 @@
 
 const { createClient } = require('@supabase/supabase-js');
 
-const SEARCH_URL = 'https://www.googleapis.com/customsearch/v1';
+const WIKI_URL = 'https://en.wikipedia.org/w/api.php';
 const MEAL_DB_URL = 'https://www.themealdb.com/api/json/v1/1/search.php';
 
 function getSupabase() {
@@ -40,13 +40,25 @@ async function getMealDBPhoto(dishName) {
   return json.meals?.[0]?.strMealThumb ?? null;
 }
 
-async function getSearchPhoto(dishName, restaurantName) {
-  const query = `${dishName} food dish photo`;
-  const url = `${SEARCH_URL}?key=${process.env.SEARCH_API_KEY}&cx=${process.env.SEARCH_CX}&searchType=image&num=1&q=${encodeURIComponent(query)}&imgSize=medium&safe=active`;
-  const res = await fetch(url);
+async function getWikipediaPhoto(dishName) {
+  const params = new URLSearchParams({
+    action: 'query',
+    generator: 'search',
+    gsrsearch: dishName,
+    gsrlimit: '1',
+    prop: 'pageimages',
+    piprop: 'original',
+    format: 'json',
+    origin: '*',
+  });
+  const res = await fetch(`${WIKI_URL}?${params.toString()}`, {
+    headers: { 'User-Agent': 'PeekApp/1.0 (https://peek-api.vercel.app)' },
+  });
   if (!res.ok) return null;
   const json = await res.json();
-  return json.items?.[0]?.link ?? null;
+  const pages = json.query?.pages ?? {};
+  const page = Object.values(pages)[0];
+  return page?.original?.source ?? null;
 }
 
 async function getPhotoForDish(dishName, restaurantName) {
@@ -59,10 +71,10 @@ async function getPhotoForDish(dishName, restaurantName) {
     return { url: mealDb, source: 'mealdb' };
   }
 
-  const search = await getSearchPhoto(dishName, restaurantName).catch(() => null);
-  if (search) {
-    await setCachedPhoto(dishName, search, 'search');
-    return { url: search, source: 'search' };
+  const wiki = await getWikipediaPhoto(dishName).catch(() => null);
+  if (wiki) {
+    await setCachedPhoto(dishName, wiki, 'wikipedia');
+    return { url: wiki, source: 'wikipedia' };
   }
 
   return { url: null, source: 'none' };
